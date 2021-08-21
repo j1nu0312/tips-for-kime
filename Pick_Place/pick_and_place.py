@@ -29,21 +29,34 @@
 
 
 
-import rospy, roslaunch
+import rospy        # Python ROS 라이브러리
+import roslaunch    # Python ROS Launch 라이브러리
 import numpy as np
-import subprocess
-import os
-import sys
-from enum import Enum
-from std_msgs.msg import UInt8, Float32MultiArray
+import subprocess   # linux command 들을 python 내에서 실행시키게 해주는 package
+import os           # 디렉터리(폴더)나 경로, 파일 등 활용
+import sys          # python 인터프리터가 제공하는 변수와 함수를 직접 제어
+
+from enum import Enum   # 열거형(enumeration) 지원 [class enum.Enum : 열거형 상수를 만들기 위한 베이스 클래스]
+
+# [ref] http://wiki.ros.org/std_msgs
+from std_msgs.msg import UInt8, Float32MultiArray   # ROS 표준 메세지 패키지
+
+# [ref] http://docs.ros.org/en/jade/api/tf/html/python/transformations.html
 from tf.transformations import *
 import tf
-from PySide import QtCore, QtGui, QtOpenGL
-from sensor_msgs.msg import JointState
-from geometry_msgs.msg import PoseStamped, Pose, Point
+
+from PySide import QtCore, QtGui, QtOpenGL  # 윈도우(화면) 처리를 위한 라이브러리
+
+# [ref] http://wiki.ros.org/sensor_msgs
+from sensor_msgs.msg import JointState      # ROS Sensor 관련 메세지
+# [ref] http://wiki.ros.org/geometry_msgs
+from geometry_msgs.msg import PoseStamped, Pose, Point  # ROS geometric 관련 메세지
+
 from math import pow, atan2, sqrt
 
-# Manipulator 
+# Manipulator (OpenManipulator 관련 메세지)
+# [ref] http://wiki.ros.org/open_manipulator_msgs
+# [githib] https://github.com/ROBOTIS-GIT/open_manipulator_msgs
 from open_manipulator_msgs.msg import JointPosition
 from open_manipulator_msgs.msg import KinematicsPose
 from open_manipulator_msgs.msg import OpenManipulatorState
@@ -53,9 +66,12 @@ from open_manipulator_msgs.srv import GetJointPosition
 from open_manipulator_msgs.srv import GetKinematicsPose
 from open_manipulator_msgs.srv import SetActuatorState
  
+ 
+ # PickAndPlace 클래스 선언
 class PickAndPlace():
-    def __init__(self):       
-
+    ## PickAndPlace 생성자 (초기화)
+    def __init__(self):
+        # [ref] https://docs.python.org/3.8/library/enum.html#functional-api
         self.CurrentMode = Enum('CurrentMode', 
                                    'idle \
                                     init \
@@ -64,48 +80,63 @@ class PickAndPlace():
                                     close_object \
                                     move_to_place' )   
 
+        # [ref] http://docs.ros.org/en/diamondback/api/tf/html/c++/classtf_1_1TransformListener.html
         self.listener = tf.TransformListener()
+
         self.jointStates = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         self.kinematicsStates = [0.0, 0.0, 0.0]
         self.open_manipulator_moving_state = "STOPPED"
         self.current_mode = self.CurrentMode.init.value
-        self.pickObjectPose = PoseStamped()
+        self.pickObjectPose = PoseStamped()     # A Pose with reference coordinate frame and timestamp
         self.pickTargetPose = PoseStamped()    
         self.placeObjectPose = PoseStamped()
         self.placeTargetPose = PoseStamped()         
         self.is_triggered = False
-        self.currentToolPose = Pose()
+        self.currentToolPose = Pose()           # A representation of pose in free space, composed of position and orientation.
+
+        ## [example]
+        # 1 global_name = rospy.get_param("/global_name")
+        # 2 relative_name = rospy.get_param("relative_name")
+        # 3 private_param = rospy.get_param('~private_name')
+        # 4 default_param = rospy.get_param('default_param', 'default_value')
         self.use_platform = rospy.get_param("~use_platform","true")
-        
+
+        ## 오픈메니퓰레이터에서 제공하는 서비스들
+        # [ref] http://wiki.ros.org/open_manipulator_controller
         self.set_joint_position = rospy.ServiceProxy('goal_joint_space_path', SetJointPosition)
         self.set_kinematics_position = rospy.ServiceProxy('goal_task_space_path_position_only', SetKinematicsPose)
         self.set_joint_position_from_present = rospy.ServiceProxy('goal_joint_space_path_from_present', SetJointPosition)
         self.set_actuator_state = rospy.ServiceProxy('set_actuator_state', SetActuatorState)
         self.set_gripper_control = rospy.ServiceProxy('goal_tool_control', SetJointPosition)
 
+        ## 오픈메니퓰레이터에서 제공하는 Published Topics
         self.open_manipulator_joint_states_sub_ = rospy.Subscriber('joint_states', JointState, self.jointStatesCallback)
         self.open_manipulator_kinematics_pose_sub_ = rospy.Subscriber('gripper/kinematics_pose', KinematicsPose, self.kinematicsPoseCallback)
         self.open_manipulator_states_sub = rospy.Subscriber('states', OpenManipulatorState, self.statesCallback)
+        
+        # 검출한 Object 정보와 관련
         self.object_sub = rospy.Subscriber('objects', Float32MultiArray, self.objectCallback)
         
         rospy.sleep(1)
         # actuator enable 
-        self.actuatorTorque(True)
-        self.setInitPose()
+        self.actuatorTorque(True)   # 오픈 메니퓰레이터 On
+        self.setInitPose()          # 초기위치로 이동
 
-        loop_rate = rospy.Rate(10) # 10hz
+        loop_rate = rospy.Rate(10) # 10hz (1초에 10번 주기)
         
         while not rospy.is_shutdown() :
-            if self.is_triggered == True:
-                self.fnControlNode()
+            if self.is_triggered == True:   # 조인트 정보 읽었느지 확인
+                self.fnControlNode()        # Pick & Place 상태 제어 루프
                 pass
             loop_rate.sleep()
 
+    # 오픈 메니퓰레이터 기구학 좌표 (x,y,z) 업데이트
     def kinematicsPoseCallback(self, msg):
         self.currentToolPose = msg.pose
         rospy.logwarn(' currentToolPose x,y,z %.2f , %.2f, %.2f  ', \
                         self.currentToolPose.position.x, self.currentToolPose.position.y, self.currentToolPose.position.z )
 
+    # Pick & Place 상태 제어 루프
     def fnControlNode(self):
         # lane_following
         if self.current_mode == self.CurrentMode.init.value:
@@ -149,6 +180,7 @@ class PickAndPlace():
             rospy.sleep(3)
             self.current_mode = self.CurrentMode.init.value
 
+    # 물체 인식 관련 함수
     def objectCallback(self,msg):
         # init position
         pickObejectNumList = [100,101,102,103,104,105,106,107,108,109,110] 
@@ -184,6 +216,7 @@ class PickAndPlace():
                             qtBottomLeft.x(), qtBottomLeft.y(),
                             qtBottomRight.x(), qtBottomRight.y())'''
             try:
+                # [ref] http://docs.ros.org/en/diamondback/api/tf/html/c++/classtf_1_1Transformer.html
                 (trans,rot) = self.listener.lookupTransform('link1', 'object_'+str(id), rospy.Time(0))
                 self.pickObjectPose.header.stamp = rospy.get_rostime()
                 self.pickObjectPose.pose.position.x = trans[0]
@@ -229,6 +262,7 @@ class PickAndPlace():
             except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException):
                 rospy.logwarn('there is not tf of placeObject_%s ' , str(id) )                
 
+    # 오픈메니퓰레이터 물체로 이동
     def moveToObject(self):
         rospy.logwarn("move to object")
         resp = False
@@ -268,7 +302,7 @@ class PickAndPlace():
 
         return resp
 
-
+    # 오픈메니퓰레이터 물체로 잡기
     def closeToObject(self):
         rospy.logwarn("close to object")
         resp = False
@@ -315,6 +349,7 @@ class PickAndPlace():
 
         return resp        
 
+    # 오픈메니퓰레이터 내려놓기 장소로 이동
     def moveToPlace(self):
         rospy.logwarn("move_to_place")
 
@@ -324,7 +359,7 @@ class PickAndPlace():
         joint_position.position =  [-0.01] #-0.01 0.01
         resp = False
         try:    
-            path_time = 1                    
+            path_time = 1       # ??
             resp = self.set_gripper_control("",joint_position, path_time)
             rospy.sleep(path_time)
         except rospy.ServiceException, e:
@@ -389,6 +424,8 @@ class PickAndPlace():
 
         return True          
 
+
+    # 물체 위치 계산 (물체 위치 + 진행 거리)
     def forwardObjectPosition( self, objectPosition, forward_distance ):
         resultPoint = Point()
         if(abs(objectPosition.x) < 0.001) :
@@ -404,8 +441,9 @@ class PickAndPlace():
         rospy.loginfo("%.2f m forward,so objectposition change xyz(%.2f ,%.2f, %.2f) -> xyz(%.2f ,%.2f, %.2f)",
                        forward_distance, objectPosition.x, objectPosition.y, objectPosition.z , 
                        resultPoint.x, resultPoint.y, resultPoint.z)
-        return resultPoint        
+        return resultPoint
 
+    # 오픈메니퓰레이터 전원 설정 Set Actuator (Torque On/Off)
     def actuatorTorque(self, enable):
         rospy.logwarn("actuatorTorque")
         joint_name = ['joint1','joint2','joint3','joint4','gripper']
@@ -419,6 +457,7 @@ class PickAndPlace():
             rospy.loginfo("set_actuator enable fail")        
         return resp
 
+    # Set 초기위치 이동
     def setInitPose(self):
         rospy.logwarn("setInitPose")
         # init position
@@ -436,6 +475,7 @@ class PickAndPlace():
         if not resp :
             return False    
 
+    # 오픈메니퓰레이터 물러섬 위치 이동 (그리퍼 오픈)
     def setBackwardPose(self):
         rospy.logwarn("setInitPose")
         # init position
@@ -459,7 +499,7 @@ class PickAndPlace():
         joint_position.position =  [0.01] #-0.01 0.01
         resp = False
         try:    
-            path_time = 1                    
+            path_time = 1        # 그리퍼 ??
             resp = self.set_gripper_control("",joint_position, path_time)
             rospy.sleep(path_time)
         except rospy.ServiceException, e:
@@ -469,6 +509,7 @@ class PickAndPlace():
 
         return True         
 
+    # 오픈메니퓰레이터 물러섬 위치2 이동 (그리퍼 X)
     def setBackwardPose2(self):
         rospy.logwarn("setInitPose")
         # init position
@@ -488,12 +529,14 @@ class PickAndPlace():
 
         return True              
 
+    # 오픈메니퓰레이터 x,y,z 좌표 업데이트
     def kinematicsPoseCallback(self, msg):
         self.kinematicsStates[0] = msg.pose.position.x
         self.kinematicsStates[1] = msg.pose.position.y
         self.kinematicsStates[2] = msg.pose.position.z
         #rospy.logwarn(' kinematicsPoseCallback %.2f , %.2f, %.2f  ', self.kinematicsStates[0], self.kinematicsStates[1], self.kinematicsStates[2] )
 
+    # 오픈메니퓰레이터 조인트 값 업데이트
     def jointStatesCallback(self, msg):
 	    #rospy.logwarn('jointStatesCallback %d ', len(msg.position) )
         self.is_triggered = True
@@ -501,14 +544,17 @@ class PickAndPlace():
             self.jointStates[i] = pose
             #print 'boundingBoxe {} {} '.format(i, pose)            
 
+    # 오픈메니퓰레이터 상태 업데이트
     def statesCallback(self, msg):	
         self.open_manipulator_moving_state = msg.open_manipulator_moving_state
 
     def main(self):
         rospy.spin()
 
+
+# Main 함수
 if __name__ == '__main__':
-    rospy.init_node('pick_node_controller')
-    rospy.loginfo("pick_node_controller")
-    node = PickAndPlace()
-    node.main()
+    rospy.init_node('pick_node_controller')     # 'pick_node_controller' 이름의 노드 생성
+    rospy.loginfo("pick_node_controller")       # 로그 정보 출력
+    node = PickAndPlace()                       # PickAndPlace 클래스 인스턴트 생성
+    node.main()                                 # ROS Node 루프 (rospy.spin())
