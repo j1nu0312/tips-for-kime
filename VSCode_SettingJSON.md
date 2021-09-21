@@ -1,4 +1,5 @@
 # Enable "conda activate" in Powershell of VS Code
+https://krishansubudhi.github.io/vscode/2020/09/17/vscod-conda-powershell.html
 # Ctrl + Shift + P -> Preferences: Open Settings (JSON)
 {
     "workbench.colorTheme": "Default Dark+",
